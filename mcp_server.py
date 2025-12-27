@@ -27,7 +27,7 @@ def check_api():
 
 
 @mcp.tool()
-def save_memory(content: str, category: str = "claude_desktop") -> str:
+def save_memory(content: str, category: str = "general") -> str:
     """
     Save important information, code snippets, preferences, or decisions to local persistent memory.
 
@@ -39,7 +39,14 @@ def save_memory(content: str, category: str = "claude_desktop") -> str:
 
     Args:
         content: The information to remember. Be specific and include context.
-        category: Category tag (e.g., "coding", "project_x", "personal"). Defaults to "claude_desktop".
+        category: Category in format "project:type" or just "type".
+            Projects: content-refinery, job-search, personal-crm, general
+            Types vary by project:
+            - content-refinery: content_preference, publishing_decision, emotional_insight, source_learning
+            - job-search: role_preference, application_insight, interview_learning, match_feedback, job_lead
+            - personal-crm: relationship_context, communication_pattern, voice_style, interaction_insight
+            - general: preference, learning, decision
+            Examples: "job-search:role_preference", "personal-crm:relationship_context"
 
     Returns:
         Success or error message.
@@ -47,18 +54,26 @@ def save_memory(content: str, category: str = "claude_desktop") -> str:
     if not check_api():
         return "Error: Local Memory server is not running. Please run 'brain start' in terminal."
 
+    # Parse category format (project:type or just type)
+    if ":" in category:
+        project, cat_type = category.split(":", 1)
+    else:
+        project = "general"
+        cat_type = category
+
     try:
         response = requests.post(
             f"{API_URL}/add",
             json={
                 "text": content,
-                "category": category,
-                "source": "claude_desktop"
+                "category": cat_type,
+                "project": project,
+                "source": "claude_code"
             },
             timeout=30
         )
         if response.status_code == 200:
-            return f"Memory saved successfully: {content[:50]}..."
+            return f"Memory saved [{project}:{cat_type}]: {content[:50]}..."
         else:
             return f"Error saving memory: {response.text}"
     except Exception as e:
@@ -230,6 +245,177 @@ def memory_stats() -> str:
         output += "By category:\n"
         for cat, count in sorted(categories.items(), key=lambda x: -x[1]):
             output += f"  - {cat}: {count}\n"
+
+        return output
+
+    except Exception as e:
+        return f"Error: {str(e)}"
+
+
+# ===== EMOTIONAL PATTERN TOOLS =====
+
+EMOTIONAL_CATEGORIES = [
+    "emotional_pattern",
+    "thinking_trap",
+    "trigger",
+    "coping_strategy",
+    "growth_insight",
+    "core_value",
+    "emotional",
+]
+
+
+@mcp.tool()
+def search_emotional_patterns(query: str, limit: int = 5) -> str:
+    """
+    Search through emotional patterns, thinking traps, and psychological insights.
+
+    AUTOMATICALLY USE THIS when the conversation involves:
+    - User expressing anxiety, stress, frustration, or difficult emotions
+    - Career uncertainty or job-related stress
+    - Decision-making paralysis or overthinking
+    - Self-doubt or imposter syndrome
+    - Work-life balance struggles
+
+    This searches patterns extracted from Rosebud emotional journal entries.
+
+    Args:
+        query: What emotional context you're looking for (e.g., "anxiety about career", "feeling overwhelmed")
+        limit: Maximum results (default: 5)
+
+    Returns:
+        Relevant emotional patterns, triggers, and insights.
+    """
+    if not check_api():
+        return "Error: Local Memory server is not running. Please run 'brain start' in terminal."
+
+    try:
+        # Use direct endpoint (no LLM needed)
+        response = requests.get(
+            f"{API_URL}/direct/search",
+            params={"q": query, "limit": limit * 2},
+            timeout=30
+        )
+
+        if response.status_code != 200:
+            return f"Error searching: {response.text}"
+
+        data = response.json()
+        results = data.get("results", [])
+
+        # Filter to emotional categories
+        emotional_results = [
+            r for r in results
+            if r.get("metadata", {}).get("category", "") in EMOTIONAL_CATEGORIES
+        ][:limit]
+
+        if not emotional_results:
+            return "No emotional patterns found matching your query."
+
+        output = f"Found {len(emotional_results)} emotional patterns:\n\n"
+        for i, mem in enumerate(emotional_results, 1):
+            memory_text = mem.get("memory", "No content")
+            category = mem.get("metadata", {}).get("category", "emotional")
+            output += f"{i}. [{category}]\n   {memory_text}\n\n"
+
+        return output
+
+    except Exception as e:
+        return f"Error: {str(e)}"
+
+
+@mcp.tool()
+def get_coping_strategies(situation: str) -> str:
+    """
+    Retrieve coping strategies that have worked for specific emotions or situations.
+
+    USE THIS when the user:
+    - Is experiencing anxiety, stress, or overwhelm
+    - Needs help managing difficult emotions
+    - Is facing a triggering situation (interviews, deadlines, conflicts)
+    - Asks "what helps with X" or "how do I handle Y"
+
+    Args:
+        situation: The emotional situation (e.g., "feeling anxious", "burnout", "interview stress")
+
+    Returns:
+        Coping strategies that have been effective in similar situations.
+    """
+    if not check_api():
+        return "Error: Local Memory server is not running. Please run 'brain start' in terminal."
+
+    try:
+        # Use direct endpoint (no LLM needed)
+        response = requests.get(
+            f"{API_URL}/direct/search",
+            params={"q": f"coping strategy {situation}", "limit": 10},
+            timeout=30
+        )
+
+        if response.status_code != 200:
+            return f"Error searching: {response.text}"
+
+        data = response.json()
+        results = data.get("results", [])
+
+        # Filter to coping strategies and related
+        coping_results = [
+            r for r in results
+            if r.get("metadata", {}).get("category", "") in ["coping_strategy", "growth_insight"]
+        ][:5]
+
+        if not coping_results:
+            return f"No specific coping strategies found for: {situation}"
+
+        output = f"Coping strategies for '{situation}':\n\n"
+        for i, mem in enumerate(coping_results, 1):
+            memory_text = mem.get("memory", "No content")
+            output += f"{i}. {memory_text}\n\n"
+
+        return output
+
+    except Exception as e:
+        return f"Error: {str(e)}"
+
+
+@mcp.tool()
+def get_thinking_traps() -> str:
+    """
+    List all identified thinking traps and cognitive distortions.
+
+    USE THIS when:
+    - User is catastrophizing or spiraling
+    - User shows signs of black-and-white thinking
+    - User is comparing themselves unfavorably to others
+    - To help identify unhelpful thought patterns
+
+    Returns:
+        List of thinking traps with descriptions.
+    """
+    if not check_api():
+        return "Error: Local Memory server is not running. Please run 'brain start' in terminal."
+
+    try:
+        # Use direct endpoint with category filter (no LLM needed)
+        response = requests.get(
+            f"{API_URL}/direct/list",
+            params={"category": "thinking_trap", "limit": 15},
+            timeout=30
+        )
+
+        if response.status_code != 200:
+            return f"Error searching: {response.text}"
+
+        data = response.json()
+        results = data.get("results", [])
+
+        if not results:
+            return "No thinking traps found in memory."
+
+        output = "Identified thinking traps:\n\n"
+        for i, mem in enumerate(results, 1):
+            memory_text = mem.get("memory", "No content")
+            output += f"{i}. {memory_text}\n\n"
 
         return output
 

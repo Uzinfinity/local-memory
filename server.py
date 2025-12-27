@@ -16,8 +16,12 @@ from pydantic import BaseModel
 from typing import Optional
 from mem0 import Memory
 import uvicorn
+import chromadb
+import ollama
+from pathlib import Path
+from datetime import datetime, timedelta
 
-from config import MEM0_CONFIG, USER_ID, SERVER_HOST, SERVER_PORT
+from config import MEM0_CONFIG, USER_ID, SERVER_HOST, SERVER_PORT, CHROMA_PATH, PROJECT_CATEGORIES, DEFAULT_TTL_DAYS
 
 app = FastAPI(
     title="Local Memory API",
@@ -49,7 +53,9 @@ class MemoryItem(BaseModel):
     text: str
     user_id: str = USER_ID
     category: str = "general"
+    project: str = "general"
     source: str = "api"
+    ttl_days: Optional[int] = None  # None = never expires
 
 
 class SessionData(BaseModel):
@@ -76,41 +82,92 @@ async def health_check():
 
 @app.post("/add", response_model=MemoryResponse)
 async def add_memory(item: MemoryItem):
-    """Add a new memory."""
+    """Add a new memory with project categorization and optional TTL."""
     if not m:
         raise HTTPException(status_code=503, detail="Memory not initialized")
 
     try:
+        # Build metadata
+        metadata = {
+            "category": item.category,
+            "project": item.project,
+            "source": item.source,
+            "created_at": datetime.now().isoformat()
+        }
+
+        # Calculate expiration if TTL specified or category has default TTL
+        ttl = item.ttl_days
+        if ttl is None and item.project in PROJECT_CATEGORIES:
+            cat_config = PROJECT_CATEGORIES[item.project].get(item.category, {})
+            ttl = cat_config.get("ttl_days")
+
+        if ttl is not None:
+            expires_at = datetime.now() + timedelta(days=ttl)
+            metadata["expires_at"] = expires_at.isoformat()
+            metadata["ttl_days"] = ttl
+
         result = m.add(
             item.text,
             user_id=item.user_id,
-            metadata={"category": item.category, "source": item.source}
+            metadata=metadata
         )
         return MemoryResponse(
             status="success",
-            message="Memory saved",
+            message=f"Memory saved [{item.project}:{item.category}]",
             data=result
         )
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
 
+def filter_expired(results: list) -> list:
+    """Filter out expired memories."""
+    now = datetime.now()
+    valid = []
+    for r in results:
+        expires_at = r.get("metadata", {}).get("expires_at")
+        if expires_at:
+            try:
+                exp_date = datetime.fromisoformat(expires_at)
+                if exp_date < now:
+                    continue  # Skip expired
+            except ValueError:
+                pass  # Invalid date format, keep it
+        valid.append(r)
+    return valid
+
+
 @app.get("/search")
 async def search_memory(
     q: str = Query(..., description="Search query"),
     limit: int = Query(5, description="Number of results"),
-    user_id: str = Query(USER_ID, description="User ID")
+    user_id: str = Query(USER_ID, description="User ID"),
+    project: str = Query(None, description="Filter by project")
 ):
-    """Search memories."""
+    """Search memories with optional project filter and expiration handling."""
     if not m:
         raise HTTPException(status_code=503, detail="Memory not initialized")
 
     try:
-        results = m.search(q, user_id=user_id, limit=limit)
+        # Fetch more results to account for expired ones being filtered
+        results = m.search(q, user_id=user_id, limit=limit * 2)
+        memories = results.get("results", [])
+
+        # Filter by project if specified
+        if project:
+            memories = [r for r in memories if r.get("metadata", {}).get("project") == project]
+
+        # Filter out expired memories
+        memories = filter_expired(memories)
+
+        # Limit to requested count
+        memories = memories[:limit]
+
         return {
             "status": "success",
             "query": q,
-            "results": results.get("results", [])
+            "project": project,
+            "results": memories
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -119,17 +176,32 @@ async def search_memory(
 @app.get("/list")
 async def list_memories(
     limit: int = Query(20, description="Number of results"),
-    user_id: str = Query(USER_ID, description="User ID")
+    user_id: str = Query(USER_ID, description="User ID"),
+    project: str = Query(None, description="Filter by project")
 ):
-    """List all memories."""
+    """List all memories with optional project filter and expiration handling."""
     if not m:
         raise HTTPException(status_code=503, detail="Memory not initialized")
 
     try:
-        results = m.get_all(user_id=user_id, limit=limit)
+        # Fetch more results to account for filtered ones
+        results = m.get_all(user_id=user_id, limit=limit * 2)
+        memories = results.get("results", [])
+
+        # Filter by project if specified
+        if project:
+            memories = [r for r in memories if r.get("metadata", {}).get("project") == project]
+
+        # Filter out expired memories
+        memories = filter_expired(memories)
+
+        # Limit to requested count
+        memories = memories[:limit]
+
         return {
             "status": "success",
-            "results": results.get("results", [])
+            "project": project,
+            "results": memories
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -200,6 +272,126 @@ async def get_stats():
         return {
             "status": "success",
             "total_memories": len(memories),
+            "by_category": categories
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ===== DIRECT CHROMADB ENDPOINTS (no LLM needed) =====
+
+def get_chroma_collection():
+    """Get ChromaDB collection from mem0's internal vector store."""
+    if m and hasattr(m, 'vector_store') and hasattr(m.vector_store, 'collection'):
+        return m.vector_store.collection
+    # Fallback: access directly (only if mem0 not initialized)
+    raise HTTPException(status_code=503, detail="Memory not initialized")
+
+
+def get_embedding(text: str) -> list[float]:
+    """Get embedding from local Ollama."""
+    response = ollama.embeddings(model="nomic-embed-text", prompt=text)
+    return response["embedding"]
+
+
+@app.get("/direct/search")
+async def direct_search(
+    q: str = Query(..., description="Search query"),
+    limit: int = Query(5, description="Number of results"),
+    category: str = Query(None, description="Filter by category")
+):
+    """Direct ChromaDB search - no LLM needed, uses local embeddings only."""
+    try:
+        query_embedding = get_embedding(q)
+        collection = get_chroma_collection()
+
+        where_filter = None
+        if category:
+            where_filter = {"category": category}
+
+        results = collection.query(
+            query_embeddings=[query_embedding],
+            n_results=limit,
+            where=where_filter,
+            include=["documents", "metadatas", "distances"]
+        )
+
+        formatted = []
+        if results["documents"] and results["documents"][0]:
+            for i, doc in enumerate(results["documents"][0]):
+                meta = results["metadatas"][0][i] if results["metadatas"] else {}
+                # Memory text can be in document or in metadata.data
+                memory_text = doc or meta.get("data", "")
+                formatted.append({
+                    "memory": memory_text,
+                    "metadata": meta,
+                    "score": 1 - (results["distances"][0][i] if results["distances"] else 0),
+                    "id": results["ids"][0][i] if results["ids"] else None
+                })
+
+        return {
+            "status": "success",
+            "query": q,
+            "results": formatted
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/direct/list")
+async def direct_list(
+    limit: int = Query(20, description="Number of results"),
+    category: str = Query(None, description="Filter by category")
+):
+    """Direct list from ChromaDB."""
+    try:
+        collection = get_chroma_collection()
+        where_filter = None
+        if category:
+            where_filter = {"category": category}
+
+        results = collection.get(
+            limit=limit,
+            where=where_filter,
+            include=["documents", "metadatas"]
+        )
+
+        formatted = []
+        if results["documents"]:
+            for i, doc in enumerate(results["documents"]):
+                meta = results["metadatas"][i] if results["metadatas"] else {}
+                memory_text = doc or meta.get("data", "")
+                formatted.append({
+                    "memory": memory_text,
+                    "metadata": meta,
+                    "id": results["ids"][i] if results["ids"] else None
+                })
+
+        return {
+            "status": "success",
+            "results": formatted
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/direct/stats")
+async def direct_stats():
+    """Direct stats from ChromaDB."""
+    try:
+        collection = get_chroma_collection()
+        all_docs = collection.get(include=["metadatas"])
+        total = len(all_docs["ids"]) if all_docs["ids"] else 0
+
+        categories = {}
+        if all_docs["metadatas"]:
+            for meta in all_docs["metadatas"]:
+                cat = meta.get("category", "general")
+                categories[cat] = categories.get(cat, 0) + 1
+
+        return {
+            "status": "success",
+            "total_memories": total,
             "by_category": categories
         }
     except Exception as e:
