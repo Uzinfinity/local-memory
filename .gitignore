@@ -1,0 +1,35 @@
+# Environment
+.env
+venv/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Data files (local only)
+chroma_data/
+lancedb_data/
+history.db
+*.db
+
+# Logs
+logs/
+*.log
+
+# Server state
+.server.pid
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Claude
+.claude/
+
+# OS
+.DS_Store
+Thumbs.db

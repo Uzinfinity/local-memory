@@ -1,0 +1,21 @@
+{
+  "manifest_version": 3,
+  "name": "Local Memory Brain",
+  "version": "1.0.0",
+  "description": "Save selected text to your local memory brain. Works with Claude, ChatGPT, Gemini, and any website.",
+  "permissions": [
+    "contextMenus",
+    "activeTab",
+    "scripting",
+    "notifications"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "action": {
+    "default_popup": "popup.html"
+  },
+  "host_permissions": [
+    "http://localhost:8000/*"
+  ]
+}
