@@ -294,6 +294,60 @@ def get_embedding(text: str) -> list[float]:
     return response["embedding"]
 
 
+@app.post("/direct/add")
+async def direct_add(item: MemoryItem):
+    """
+    Direct add to ChromaDB - bypasses LLM extraction.
+    Use when the caller (e.g., Claude) has already extracted the insight.
+    Only uses local Ollama embeddings.
+    """
+    try:
+        # Get embedding from local Ollama
+        embedding = get_embedding(item.text)
+        collection = get_chroma_collection()
+
+        # Build metadata
+        metadata = {
+            "category": item.category,
+            "project": item.project,
+            "source": item.source,
+            "created_at": datetime.now().isoformat(),
+            "user_id": item.user_id,
+            "data": item.text  # Store full text in metadata too
+        }
+
+        # Calculate expiration if applicable
+        ttl = item.ttl_days
+        if ttl is None and item.project in PROJECT_CATEGORIES:
+            cat_config = PROJECT_CATEGORIES[item.project].get(item.category, {})
+            ttl = cat_config.get("ttl_days")
+
+        if ttl is not None:
+            expires_at = datetime.now() + timedelta(days=ttl)
+            metadata["expires_at"] = expires_at.isoformat()
+            metadata["ttl_days"] = ttl
+
+        # Generate unique ID
+        import hashlib
+        doc_id = hashlib.md5(f"{item.text}{datetime.now().isoformat()}".encode()).hexdigest()[:16]
+
+        # Insert directly into ChromaDB
+        collection.add(
+            ids=[doc_id],
+            embeddings=[embedding],
+            documents=[item.text],
+            metadatas=[metadata]
+        )
+
+        return MemoryResponse(
+            status="success",
+            message=f"Memory saved directly [{item.project}:{item.category}]",
+            data={"id": doc_id}
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @app.get("/direct/search")
 async def direct_search(
     q: str = Query(..., description="Search query"),
