@@ -1,0 +1,23 @@
+# Ruff configuration - replaces black, isort, flake8
+# Personal quality baseline: minimum effective dose
+
+line-length = 120
+target-version = "py311"
+
+[lint]
+select = [
+    "E",    # pycodestyle errors
+    "W",    # pycodestyle warnings
+    "F",    # pyflakes
+    "I",    # isort
+    "B",    # flake8-bugbear
+    "UP",   # pyupgrade
+]
+ignore = [
+    "E501", # line too long (handled by formatter)
+    "B008", # function call in default argument
+]
+
+[format]
+quote-style = "double"
+indent-style = "space"

@@ -452,6 +452,123 @@ async def direct_stats():
         raise HTTPException(status_code=500, detail=str(e))
 
 
+# ===== MEMORY PRUNING ENDPOINT =====
+
+class PruneResponse(BaseModel):
+    status: str
+    pruned_count: int
+    total_before: int
+    total_after: int
+    by_category: dict
+
+
+@app.post("/prune", response_model=PruneResponse)
+async def prune_expired_memories(
+    dry_run: bool = Query(False, description="Preview what would be pruned without deleting")
+):
+    """
+    Prune expired memories based on their TTL.
+
+    Memories with an `expires_at` field in metadata that is in the past
+    will be deleted. Use dry_run=true to preview without deleting.
+    """
+    try:
+        collection = get_chroma_collection()
+        all_docs = collection.get(include=["metadatas"])
+
+        if not all_docs["ids"]:
+            return PruneResponse(
+                status="success",
+                pruned_count=0,
+                total_before=0,
+                total_after=0,
+                by_category={}
+            )
+
+        total_before = len(all_docs["ids"])
+        now = datetime.now()
+
+        # Find expired memories
+        expired_ids = []
+        expired_by_category = {}
+
+        for i, doc_id in enumerate(all_docs["ids"]):
+            meta = all_docs["metadatas"][i] if all_docs["metadatas"] else {}
+            expires_at = meta.get("expires_at")
+
+            if expires_at:
+                try:
+                    exp_date = datetime.fromisoformat(expires_at)
+                    if exp_date < now:
+                        expired_ids.append(doc_id)
+                        cat = meta.get("category", "general")
+                        expired_by_category[cat] = expired_by_category.get(cat, 0) + 1
+                except ValueError:
+                    pass  # Invalid date format, skip
+
+        # Delete expired memories (unless dry run)
+        if expired_ids and not dry_run:
+            collection.delete(ids=expired_ids)
+
+        total_after = total_before - len(expired_ids) if not dry_run else total_before
+
+        return PruneResponse(
+            status="dry_run" if dry_run else "success",
+            pruned_count=len(expired_ids),
+            total_before=total_before,
+            total_after=total_after,
+            by_category=expired_by_category
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/expired")
+async def list_expired_memories(
+    limit: int = Query(50, description="Maximum expired memories to list")
+):
+    """List all currently expired memories (preview before pruning)."""
+    try:
+        collection = get_chroma_collection()
+        all_docs = collection.get(include=["documents", "metadatas"])
+
+        now = datetime.now()
+        expired = []
+
+        if all_docs["ids"]:
+            for i, doc_id in enumerate(all_docs["ids"]):
+                meta = all_docs["metadatas"][i] if all_docs["metadatas"] else {}
+                expires_at = meta.get("expires_at")
+
+                if expires_at:
+                    try:
+                        exp_date = datetime.fromisoformat(expires_at)
+                        if exp_date < now:
+                            days_expired = (now - exp_date).days
+                            doc = all_docs["documents"][i] if all_docs["documents"] else ""
+                            expired.append({
+                                "id": doc_id,
+                                "memory": doc[:100] + "..." if len(doc) > 100 else doc,
+                                "category": meta.get("category", "general"),
+                                "project": meta.get("project", "general"),
+                                "expired_at": expires_at,
+                                "days_expired": days_expired
+                            })
+                    except ValueError:
+                        pass
+
+                if len(expired) >= limit:
+                    break
+
+        return {
+            "status": "success",
+            "expired_count": len(expired),
+            "memories": expired
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 if __name__ == "__main__":
     uvicorn.run(
         "server:app",
