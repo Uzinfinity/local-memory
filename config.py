@@ -78,6 +78,22 @@ PROJECT_CATEGORIES = {
         "source_learning": {
             "description": "Insights from books, podcasts, commits",
             "ttl_days": None
+        },
+        "edit_pattern": {
+            "description": "Patterns learned from user edits to drafts",
+            "ttl_days": None
+        },
+        "voice_pattern": {
+            "description": "Writing voice patterns - phrases, tone, anti-patterns",
+            "ttl_days": None
+        },
+        "draft_version": {
+            "description": "Draft snapshots for edit tracking",
+            "ttl_days": 7  # Short-lived, just for edit capture
+        },
+        "social_performance": {
+            "description": "Engagement data from posted content",
+            "ttl_days": None
         }
     },
     "job-search": {
