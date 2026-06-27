@@ -26,6 +26,21 @@ def check_api():
         return False
 
 
+def format_memory_row(mem: dict, include_score: bool = True) -> str:
+    """Format one memory with freshness and scope metadata."""
+    memory_text = mem.get("memory") or mem.get("text") or "No content"
+    metadata = mem.get("metadata", {}) or {}
+    project = metadata.get("project", "general")
+    category = metadata.get("category", "general")
+    source = metadata.get("source", "unknown")
+    created_at = str(metadata.get("created_at", ""))[:19]
+    score = mem.get("score", 0)
+    header = f"[{created_at} {project}:{category} source={source}]"
+    if include_score:
+        header += f" relevance={score:.3f}"
+    return f"{header}\n   {memory_text}"
+
+
 @mcp.tool()
 def save_memory(content: str, category: str = "general") -> str:
     """
@@ -63,7 +78,7 @@ def save_memory(content: str, category: str = "general") -> str:
 
     try:
         response = requests.post(
-            f"{API_URL}/add",
+            f"{API_URL}/direct/add",  # Use direct endpoint (local Ollama only, no rate limits)
             json={
                 "text": content,
                 "category": cat_type,
@@ -103,7 +118,7 @@ def search_memory(query: str, limit: int = 5) -> str:
 
     try:
         response = requests.get(
-            f"{API_URL}/search",
+            f"{API_URL}/v2/search",
             params={"q": query, "limit": limit},
             timeout=10
         )
@@ -119,10 +134,7 @@ def search_memory(query: str, limit: int = 5) -> str:
 
         output = f"Found {len(results)} relevant memories:\n\n"
         for i, mem in enumerate(results, 1):
-            memory_text = mem.get("memory", "No content")
-            score = mem.get("score", 0)
-            category = mem.get("metadata", {}).get("category", "general")
-            output += f"{i}. [{category}] (relevance: {score:.2f})\n   {memory_text}\n\n"
+            output += f"{i}. {format_memory_row(mem)}\n\n"
 
         return output
 
@@ -148,7 +160,7 @@ def list_memories(limit: int = 10) -> str:
 
     try:
         response = requests.get(
-            f"{API_URL}/list",
+            f"{API_URL}/v2/recent",
             params={"limit": limit},
             timeout=10
         )
@@ -164,13 +176,7 @@ def list_memories(limit: int = 10) -> str:
 
         output = f"Showing {len(results)} memories:\n\n"
         for i, mem in enumerate(results, 1):
-            memory_text = mem.get("memory", "No content")
-            category = mem.get("metadata", {}).get("category", "general")
-            mem_id = mem.get("id", "N/A")
-            # Truncate long memories
-            if len(memory_text) > 100:
-                memory_text = memory_text[:100] + "..."
-            output += f"{i}. [{category}] {memory_text}\n   ID: {mem_id}\n\n"
+            output += f"{i}. {format_memory_row(mem, include_score=False)}\n   ID: {mem.get('id', 'N/A')}\n\n"
 
         return output
 
@@ -196,8 +202,8 @@ def get_project_context(project_name: str) -> str:
 
     try:
         response = requests.get(
-            f"{API_URL}/context",
-            params={"project": project_name, "limit": 10},
+            f"{API_URL}/v2/context_pack",
+            params={"project": project_name, "workflow": "default", "limit": 10},
             timeout=10
         )
 

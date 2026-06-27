@@ -1,0 +1,111 @@
+{
+  "suite": "scheduled_retrieval_eval_cases",
+  "description": "Structure-only template for scheduled Local Memory retrieval evals. Copy to eval_cases/local/scheduled_retrieval_eval_cases.json and fill with private local memory ids/queries.",
+  "default_top_k": 5,
+  "cases": [
+    {
+      "id": "nightly_latest_work_decision",
+      "scheduled_skill": "nightly-check-in:block1-work",
+      "query": "<private query for the latest important work decision>",
+      "project": "content-refinery",
+      "top_k": 3,
+      "expected_ids_any": ["<private-memory-id>"],
+      "required_category_any": ["work_insight", "decision_pattern", "career_signal"],
+      "required_terms_any": ["<private anchor term>"],
+      "forbidden_projects": ["job-search", "personal-crm"]
+    },
+    {
+      "id": "nightly_health_override",
+      "scheduled_skill": "nightly-check-in:block3-health",
+      "query": "<private query for the latest health/self-report override>",
+      "project": "content-refinery",
+      "top_k": 5,
+      "expected_ids_any": ["<private-memory-id>"],
+      "required_category_any": ["health_correlation", "routine_pattern"],
+      "required_terms_any": ["<private health anchor term>"],
+      "forbidden_projects": ["job-search", "personal-crm"]
+    },
+    {
+      "id": "nightly_transcript_evidence",
+      "scheduled_skill": "nightly-check-in:voice-memo-transcripts",
+      "query": "<private query for transcript-derived work/career evidence>",
+      "project": "content-refinery",
+      "top_k": 5,
+      "expected_ids_any": ["<private-memory-id>"],
+      "required_category_any": ["work_insight", "career_signal", "emotional_insight"],
+      "required_terms_any": ["transcript", "voice memo"],
+      "forbidden_projects": ["job-search", "personal-crm"],
+      "requires_transcript_evidence": true
+    },
+    {
+      "id": "doogle_morning_email_work_priority",
+      "scheduled_skill": "doogle-morning-email:work-strategist",
+      "query": "<private query for the morning email's top work priority>",
+      "project": "content-refinery",
+      "top_k": 5,
+      "expected_ids_any": ["<private-memory-id>"],
+      "required_category_any": ["work_insight", "career_signal", "health_correlation"],
+      "forbidden_projects": ["job-search", "personal-crm"]
+    },
+    {
+      "id": "morning_briefing_relationship_scope",
+      "scheduled_skill": "morning-briefing:personal-crm",
+      "query": "<private query for a relationship/channel/follow-up case>",
+      "project": "personal-crm",
+      "top_k": 5,
+      "expected_ids_any": ["<private-memory-id>"],
+      "required_category_any": ["relationship_context", "interaction_insight", "communication_pattern"],
+      "forbidden_projects": ["content-refinery", "job-search"]
+    },
+    {
+      "id": "monthly_career_cross_project",
+      "scheduled_skill": "monthly-career-check-in:career-context",
+      "query": "<private query spanning career, work, and job-search context>",
+      "top_k": 7,
+      "expected_ids_any": ["<private-memory-id>"],
+      "required_category_any": ["career_signal", "career_insight", "role_preference", "application_insight"]
+    },
+    {
+      "id": "daily_job_search_tool_memory",
+      "scheduled_skill": "daily-job-search-block:marc-job-search",
+      "query": "<private query for a known scraper/source/workaround memory>",
+      "project": "job-search",
+      "top_k": 5,
+      "expected_ids_any": ["<private-memory-id>"],
+      "required_category_any": ["application_insight", "tool_observation"],
+      "forbidden_projects": ["content-refinery", "personal-crm"]
+    }
+  ],
+  "static_checks": [
+    {
+      "id": "nightly_every_turn_memory_search",
+      "file": "/Users/wzjbatman/.codex/automations/nightly-check-in/automation.toml",
+      "required_terms_all": ["每一轮", "Local Memory", "memory", "/v2/search", "context_pack"]
+    },
+    {
+      "id": "nightly_every_turn_transcript_search_and_quote",
+      "file": "/Users/wzjbatman/.codex/automations/nightly-check-in/automation.toml",
+      "required_terms_all": ["每一轮", "transcript", "voice memo", "引用", "quote"]
+    },
+    {
+      "id": "doogle_morning_email_memory_retrieval_contract",
+      "file": "/Users/wzjbatman/.codex/automations/doogle-morning-email/automation.toml",
+      "required_terms_all": ["Local Memory", "/v2/search", "context_pack", "quote", "phase0_local_memory"]
+    },
+    {
+      "id": "morning_briefing_memory_retrieval_contract",
+      "file": "/Users/wzjbatman/.codex/automations/morning-briefing/automation.toml",
+      "required_terms_all": ["Local Memory", "/v2/search", "context_pack", "quote"]
+    },
+    {
+      "id": "monthly_career_memory_retrieval_contract",
+      "file": "/Users/wzjbatman/.codex/automations/monthly-career-check-in/automation.toml",
+      "required_terms_all": ["Local Memory", "/v2/search", "context_pack", "quote"]
+    },
+    {
+      "id": "daily_job_search_memory_retrieval_contract",
+      "file": "/Users/wzjbatman/.codex/automations/daily-job-search-block/automation.toml",
+      "required_terms_all": ["Local Memory", "/v2/search", "context_pack", "quote"]
+    }
+  ]
+}

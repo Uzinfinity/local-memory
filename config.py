@@ -13,11 +13,14 @@ load_dotenv(Path(__file__).parent / ".env")
 PROJECT_DIR = Path(__file__).parent
 CHROMA_PATH = PROJECT_DIR / "chroma_data"
 HISTORY_DB_PATH = PROJECT_DIR / "history.db"
+MEMORY_DIR = PROJECT_DIR / "memory"
+MEMORY_INDEX_PATH = PROJECT_DIR / "memory_index.db"
 LOG_PATH = PROJECT_DIR / "logs"
 PID_FILE = PROJECT_DIR / ".server.pid"
 
 # Ensure directories exist
 CHROMA_PATH.mkdir(exist_ok=True)
+MEMORY_DIR.mkdir(exist_ok=True)
 LOG_PATH.mkdir(exist_ok=True)
 
 # API Keys and settings

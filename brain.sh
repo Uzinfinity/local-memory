@@ -12,6 +12,31 @@ LOG_FILE="$LOG_DIR/server.log"
 # Ensure log directory exists
 mkdir -p "$LOG_DIR"
 
+wait_for_ollama() {
+    local max_attempts=30
+    local attempt=0
+
+    while [ $attempt -lt $max_attempts ]; do
+        if curl -s http://localhost:11434/api/tags > /dev/null 2>&1; then
+            echo "Ollama is ready"
+            return 0
+        fi
+
+        # Try to start Ollama on attempt 3
+        if [ $attempt -eq 3 ]; then
+            echo "Starting Ollama..."
+            /opt/homebrew/bin/brew services start ollama 2>/dev/null || brew services start ollama 2>/dev/null
+        fi
+
+        echo "Waiting for Ollama (attempt $((attempt+1))/$max_attempts)..."
+        sleep 2
+        ((attempt++))
+    done
+
+    echo "Warning: Ollama not available after $max_attempts attempts"
+    return 1
+}
+
 start() {
     if [ -f "$PID_FILE" ]; then
         PID=$(cat "$PID_FILE")
@@ -23,30 +48,37 @@ start() {
 
     echo "Starting Local Memory Server..."
 
-    # Check if Ollama is running
-    if ! curl -s http://localhost:11434/api/tags > /dev/null 2>&1; then
-        echo "Warning: Ollama doesn't seem to be running."
-        echo "Starting Ollama..."
-        brew services start ollama
-        sleep 2
-    fi
+    # Wait for Ollama with retry logic
+    wait_for_ollama
 
     # Start server in background
     cd "$SCRIPT_DIR"
-    nohup "$VENV_PYTHON" "$SERVER_SCRIPT" >> "$LOG_FILE" 2>&1 &
-    echo $! > "$PID_FILE"
+    nohup env PYTHONUNBUFFERED=1 "$VENV_PYTHON" "$SERVER_SCRIPT" < /dev/null >> "$LOG_FILE" 2>&1 &
+    SERVER_PID=$!
+    echo "$SERVER_PID" > "$PID_FILE"
 
-    sleep 2
+    for i in {1..30}; do
+        if ! ps -p "$SERVER_PID" > /dev/null 2>&1; then
+            echo "Failed to start server. Process exited early. Recent logs:"
+            tail -n 40 "$LOG_FILE"
+            rm -f "$PID_FILE"
+            return 1
+        fi
 
-    if [ -f "$PID_FILE" ] && ps -p "$(cat "$PID_FILE")" > /dev/null 2>&1; then
-        echo "Server started successfully (PID: $(cat "$PID_FILE"))"
-        echo "Logs: $LOG_FILE"
-        echo "API: http://localhost:8000"
-        echo "Docs: http://localhost:8000/docs"
-    else
-        echo "Failed to start server. Check logs: $LOG_FILE"
-        return 1
-    fi
+        if curl -s http://localhost:8000/health > /dev/null 2>&1; then
+            echo "Server started successfully (PID: $SERVER_PID)"
+            echo "Logs: $LOG_FILE"
+            echo "API: http://localhost:8000"
+            echo "Docs: http://localhost:8000/docs"
+            return 0
+        fi
+
+        sleep 1
+    done
+
+    echo "Server process is running but API did not become healthy. Recent logs:"
+    tail -n 40 "$LOG_FILE"
+    return 1
 }
 
 stop() {

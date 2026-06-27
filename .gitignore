@@ -11,6 +11,10 @@ __pycache__/
 # Data files (local only)
 chroma_data/
 lancedb_data/
+memory/events/
+memory/audit/
+memory/local/
+eval_cases/local/
 history.db
 *.db
 

@@ -17,16 +17,26 @@ from typing import Optional
 from mem0 import Memory
 import uvicorn
 import chromadb
+from chromadb.config import Settings
 import ollama
-from pathlib import Path
 from datetime import datetime, timedelta
 
-from config import MEM0_CONFIG, USER_ID, SERVER_HOST, SERVER_PORT, CHROMA_PATH, PROJECT_CATEGORIES, DEFAULT_TTL_DAYS
+from config import (
+    MEM0_CONFIG,
+    USER_ID,
+    SERVER_HOST,
+    SERVER_PORT,
+    CHROMA_PATH,
+    PROJECT_CATEGORIES,
+    MEMORY_DIR,
+    MEMORY_INDEX_PATH,
+)
+from memory_store import MemoryStore, memory_to_response, normalize_project_category
 
 app = FastAPI(
     title="Local Memory API",
     description="Local memory bridge for AI assistants",
-    version="1.0.0"
+    version="2.0.0"
 )
 
 # Enable CORS for Chrome extension
@@ -48,6 +58,8 @@ except Exception as e:
     print("Make sure Ollama is running: brew services start ollama")
     m = None
 
+store: Optional[MemoryStore] = None
+
 
 class MemoryItem(BaseModel):
     text: str
@@ -55,7 +67,11 @@ class MemoryItem(BaseModel):
     category: str = "general"
     project: str = "general"
     source: str = "api"
+    source_ref: Optional[str] = None
     ttl_days: Optional[int] = None  # None = never expires
+    importance: float = 0.5
+    confidence: float = 0.8
+    tags: list[str] = []
 
 
 class SessionData(BaseModel):
@@ -76,6 +92,7 @@ async def health_check():
     return {
         "status": "healthy",
         "memory_initialized": m is not None,
+        "canonical_initialized": get_memory_store() is not None,
         "user_id": USER_ID
     }
 
@@ -83,38 +100,24 @@ async def health_check():
 @app.post("/add", response_model=MemoryResponse)
 async def add_memory(item: MemoryItem):
     """Add a new memory with project categorization and optional TTL."""
-    if not m:
-        raise HTTPException(status_code=503, detail="Memory not initialized")
-
     try:
-        # Build metadata
-        metadata = {
-            "category": item.category,
-            "project": item.project,
-            "source": item.source,
-            "created_at": datetime.now().isoformat()
-        }
-
-        # Calculate expiration if TTL specified or category has default TTL
-        ttl = item.ttl_days
-        if ttl is None and item.project in PROJECT_CATEGORIES:
-            cat_config = PROJECT_CATEGORIES[item.project].get(item.category, {})
-            ttl = cat_config.get("ttl_days")
-
-        if ttl is not None:
-            expires_at = datetime.now() + timedelta(days=ttl)
-            metadata["expires_at"] = expires_at.isoformat()
-            metadata["ttl_days"] = ttl
-
-        result = m.add(
-            item.text,
-            user_id=item.user_id,
-            metadata=metadata
+        ttl = resolve_ttl(item.project, item.category, item.ttl_days)
+        memory = get_memory_store().add_memory(
+            text=item.text,
+            project=item.project,
+            category=item.category,
+            source=item.source,
+            source_ref=item.source_ref,
+            ttl_days=ttl,
+            importance=item.importance,
+            confidence=item.confidence,
+            tags=item.tags,
+            metadata={"user_id": item.user_id},
         )
         return MemoryResponse(
             status="success",
-            message=f"Memory saved [{item.project}:{item.category}]",
-            data=result
+            message=f"Memory saved [{memory.project}:{memory.category}]",
+            data={"id": memory.id, "embedding_status": memory.embedding_status}
         )
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -142,32 +145,28 @@ async def search_memory(
     q: str = Query(..., description="Search query"),
     limit: int = Query(5, description="Number of results"),
     user_id: str = Query(USER_ID, description="User ID"),
-    project: str = Query(None, description="Filter by project")
+    project: str = Query(None, description="Filter by project"),
+    category: str = Query(None, description="Filter by category"),
+    source: str = Query(None, description="Filter by source"),
+    since: str = Query(None, description="Filter by created_at lower bound")
 ):
     """Search memories with optional project filter and expiration handling."""
-    if not m:
-        raise HTTPException(status_code=503, detail="Memory not initialized")
-
     try:
-        # Fetch more results to account for expired ones being filtered
-        results = m.search(q, user_id=user_id, limit=limit * 2)
-        memories = results.get("results", [])
-
-        # Filter by project if specified
-        if project:
-            memories = [r for r in memories if r.get("metadata", {}).get("project") == project]
-
-        # Filter out expired memories
-        memories = filter_expired(memories)
-
-        # Limit to requested count
-        memories = memories[:limit]
+        del user_id  # Canonical v2 is single-user for this local store.
+        results = get_memory_store().search(
+            q,
+            project=project,
+            category=category,
+            source=source,
+            since=since,
+            limit=limit,
+        )
 
         return {
             "status": "success",
             "query": q,
             "project": project,
-            "results": memories
+            "results": [memory_to_response(memory, score) for memory, score in results]
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -177,31 +176,26 @@ async def search_memory(
 async def list_memories(
     limit: int = Query(20, description="Number of results"),
     user_id: str = Query(USER_ID, description="User ID"),
-    project: str = Query(None, description="Filter by project")
+    project: str = Query(None, description="Filter by project"),
+    category: str = Query(None, description="Filter by category"),
+    source: str = Query(None, description="Filter by source"),
+    since: str = Query(None, description="Filter by created_at lower bound")
 ):
     """List all memories with optional project filter and expiration handling."""
-    if not m:
-        raise HTTPException(status_code=503, detail="Memory not initialized")
-
     try:
-        # Fetch more results to account for filtered ones
-        results = m.get_all(user_id=user_id, limit=limit * 2)
-        memories = results.get("results", [])
-
-        # Filter by project if specified
-        if project:
-            memories = [r for r in memories if r.get("metadata", {}).get("project") == project]
-
-        # Filter out expired memories
-        memories = filter_expired(memories)
-
-        # Limit to requested count
-        memories = memories[:limit]
+        del user_id
+        memories = get_memory_store().recent(
+            project=project,
+            category=category,
+            source=source,
+            since=since,
+            limit=limit,
+        )
 
         return {
             "status": "success",
             "project": project,
-            "results": memories
+            "results": [memory_to_response(memory) for memory in memories]
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -226,28 +220,19 @@ async def delete_memory(memory_id: str):
 @app.get("/context")
 async def get_project_context(
     project: str = Query(..., description="Project name or category"),
-    limit: int = Query(5, description="Number of results")
+    limit: int = Query(10, description="Number of results"),
+    workflow: str = Query("default", description="Workflow name")
 ):
     """Get context/memories for a specific project."""
-    if not m:
-        raise HTTPException(status_code=503, detail="Memory not initialized")
-
     try:
-        results = m.search(project, user_id=USER_ID, limit=limit)
-        memories = results.get("results", [])
-
-        # Format as context string
-        context_lines = []
-        for mem in memories:
-            text = mem.get("memory", "")
-            if text:
-                context_lines.append(f"- {text}")
+        pack = get_memory_store().context_pack(project=project, workflow=workflow, limit=limit)
 
         return {
             "status": "success",
             "project": project,
-            "context": "\n".join(context_lines),
-            "count": len(memories)
+            "context": pack["context"],
+            "sections": pack["sections"],
+            "count": pack["count"]
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -256,24 +241,10 @@ async def get_project_context(
 @app.get("/stats")
 async def get_stats():
     """Get memory statistics."""
-    if not m:
-        raise HTTPException(status_code=503, detail="Memory not initialized")
-
     try:
-        all_memories = m.get_all(user_id=USER_ID, limit=1000)
-        memories = all_memories.get("results", [])
-
-        # Count by category
-        categories = {}
-        for mem in memories:
-            cat = mem.get("metadata", {}).get("category", "general")
-            categories[cat] = categories.get(cat, 0) + 1
-
-        return {
-            "status": "success",
-            "total_memories": len(memories),
-            "by_category": categories
-        }
+        stats = get_memory_store().stats()
+        stats["status"] = "success"
+        return stats
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -284,14 +255,46 @@ def get_chroma_collection():
     """Get ChromaDB collection from mem0's internal vector store."""
     if m and hasattr(m, 'vector_store') and hasattr(m.vector_store, 'collection'):
         return m.vector_store.collection
-    # Fallback: access directly (only if mem0 not initialized)
-    raise HTTPException(status_code=503, detail="Memory not initialized")
+    client = chromadb.PersistentClient(
+        path=str(CHROMA_PATH),
+        settings=Settings(anonymized_telemetry=False)
+    )
+    return client.get_or_create_collection(name="local_memory")
 
 
 def get_embedding(text: str) -> list[float]:
     """Get embedding from local Ollama."""
     response = ollama.embeddings(model="nomic-embed-text", prompt=text)
     return response["embedding"]
+
+
+def get_memory_store() -> MemoryStore:
+    """Return the canonical memory store, with vector indexing when available."""
+    global store
+    if store is None:
+        try:
+            collection = get_chroma_collection()
+            embed_func = get_embedding
+        except Exception:
+            collection = None
+            embed_func = None
+        store = MemoryStore(
+            root_dir=MEMORY_DIR,
+            index_path=MEMORY_INDEX_PATH,
+            collection=collection,
+            embed_func=embed_func,
+        )
+    return store
+
+
+def resolve_ttl(project: str, category: str, ttl_days: Optional[int]) -> Optional[int]:
+    if ttl_days is not None:
+        return ttl_days
+    project, category = normalize_project_category(project, category)
+    if project in PROJECT_CATEGORIES:
+        cat_config = PROJECT_CATEGORIES[project].get(category, {})
+        return cat_config.get("ttl_days")
+    return None
 
 
 @app.post("/direct/add")
@@ -302,47 +305,24 @@ async def direct_add(item: MemoryItem):
     Only uses local Ollama embeddings.
     """
     try:
-        # Get embedding from local Ollama
-        embedding = get_embedding(item.text)
-        collection = get_chroma_collection()
-
-        # Build metadata
-        metadata = {
-            "category": item.category,
-            "project": item.project,
-            "source": item.source,
-            "created_at": datetime.now().isoformat(),
-            "user_id": item.user_id,
-            "data": item.text  # Store full text in metadata too
-        }
-
-        # Calculate expiration if applicable
-        ttl = item.ttl_days
-        if ttl is None and item.project in PROJECT_CATEGORIES:
-            cat_config = PROJECT_CATEGORIES[item.project].get(item.category, {})
-            ttl = cat_config.get("ttl_days")
-
-        if ttl is not None:
-            expires_at = datetime.now() + timedelta(days=ttl)
-            metadata["expires_at"] = expires_at.isoformat()
-            metadata["ttl_days"] = ttl
-
-        # Generate unique ID
-        import hashlib
-        doc_id = hashlib.md5(f"{item.text}{datetime.now().isoformat()}".encode()).hexdigest()[:16]
-
-        # Insert directly into ChromaDB
-        collection.add(
-            ids=[doc_id],
-            embeddings=[embedding],
-            documents=[item.text],
-            metadatas=[metadata]
+        ttl = resolve_ttl(item.project, item.category, item.ttl_days)
+        memory = get_memory_store().add_memory(
+            text=item.text,
+            project=item.project,
+            category=item.category,
+            source=item.source,
+            source_ref=item.source_ref,
+            ttl_days=ttl,
+            importance=item.importance,
+            confidence=item.confidence,
+            tags=item.tags,
+            metadata={"user_id": item.user_id},
         )
 
         return MemoryResponse(
             status="success",
-            message=f"Memory saved directly [{item.project}:{item.category}]",
-            data={"id": doc_id}
+            message=f"Memory saved directly [{memory.project}:{memory.category}]",
+            data={"id": memory.id, "embedding_status": memory.embedding_status}
         )
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -352,41 +332,26 @@ async def direct_add(item: MemoryItem):
 async def direct_search(
     q: str = Query(..., description="Search query"),
     limit: int = Query(5, description="Number of results"),
-    category: str = Query(None, description="Filter by category")
+    category: str = Query(None, description="Filter by category"),
+    project: str = Query(None, description="Filter by project"),
+    source: str = Query(None, description="Filter by source"),
+    since: str = Query(None, description="Filter by created_at lower bound")
 ):
     """Direct ChromaDB search - no LLM needed, uses local embeddings only."""
     try:
-        query_embedding = get_embedding(q)
-        collection = get_chroma_collection()
-
-        where_filter = None
-        if category:
-            where_filter = {"category": category}
-
-        results = collection.query(
-            query_embeddings=[query_embedding],
-            n_results=limit,
-            where=where_filter,
-            include=["documents", "metadatas", "distances"]
+        results = get_memory_store().search(
+            q,
+            project=project,
+            category=category,
+            source=source,
+            since=since,
+            limit=limit,
         )
-
-        formatted = []
-        if results["documents"] and results["documents"][0]:
-            for i, doc in enumerate(results["documents"][0]):
-                meta = results["metadatas"][0][i] if results["metadatas"] else {}
-                # Memory text can be in document or in metadata.data
-                memory_text = doc or meta.get("data", "")
-                formatted.append({
-                    "memory": memory_text,
-                    "metadata": meta,
-                    "score": 1 - (results["distances"][0][i] if results["distances"] else 0),
-                    "id": results["ids"][0][i] if results["ids"] else None
-                })
 
         return {
             "status": "success",
             "query": q,
-            "results": formatted
+            "results": [memory_to_response(memory, score) for memory, score in results]
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -395,35 +360,24 @@ async def direct_search(
 @app.get("/direct/list")
 async def direct_list(
     limit: int = Query(20, description="Number of results"),
-    category: str = Query(None, description="Filter by category")
+    category: str = Query(None, description="Filter by category"),
+    project: str = Query(None, description="Filter by project"),
+    source: str = Query(None, description="Filter by source"),
+    since: str = Query(None, description="Filter by created_at lower bound")
 ):
     """Direct list from ChromaDB."""
     try:
-        collection = get_chroma_collection()
-        where_filter = None
-        if category:
-            where_filter = {"category": category}
-
-        results = collection.get(
+        memories = get_memory_store().recent(
+            project=project,
+            category=category,
+            source=source,
+            since=since,
             limit=limit,
-            where=where_filter,
-            include=["documents", "metadatas"]
         )
-
-        formatted = []
-        if results["documents"]:
-            for i, doc in enumerate(results["documents"]):
-                meta = results["metadatas"][i] if results["metadatas"] else {}
-                memory_text = doc or meta.get("data", "")
-                formatted.append({
-                    "memory": memory_text,
-                    "metadata": meta,
-                    "id": results["ids"][i] if results["ids"] else None
-                })
 
         return {
             "status": "success",
-            "results": formatted
+            "results": [memory_to_response(memory) for memory in memories]
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -433,23 +387,78 @@ async def direct_list(
 async def direct_stats():
     """Direct stats from ChromaDB."""
     try:
-        collection = get_chroma_collection()
-        all_docs = collection.get(include=["metadatas"])
-        total = len(all_docs["ids"]) if all_docs["ids"] else 0
-
-        categories = {}
-        if all_docs["metadatas"]:
-            for meta in all_docs["metadatas"]:
-                cat = meta.get("category", "general")
-                categories[cat] = categories.get(cat, 0) + 1
-
-        return {
-            "status": "success",
-            "total_memories": total,
-            "by_category": categories
-        }
+        stats = get_memory_store().stats()
+        stats["status"] = "success"
+        return stats
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/v2/recent")
+async def v2_recent(
+    project: str = Query(None),
+    category: str = Query(None),
+    source: str = Query(None),
+    since: str = Query(None),
+    limit: int = Query(20),
+):
+    memories = get_memory_store().recent(
+        project=project,
+        category=category,
+        source=source,
+        since=since,
+        limit=limit,
+    )
+    return {"status": "success", "results": [memory_to_response(memory) for memory in memories]}
+
+
+@app.get("/v2/search")
+async def v2_search(
+    q: str = Query(...),
+    project: str = Query(None),
+    category: str = Query(None),
+    source: str = Query(None),
+    since: str = Query(None),
+    limit: int = Query(5),
+):
+    results = get_memory_store().search(
+        q,
+        project=project,
+        category=category,
+        source=source,
+        since=since,
+        limit=limit,
+    )
+    return {
+        "status": "success",
+        "query": q,
+        "results": [memory_to_response(memory, score) for memory, score in results],
+    }
+
+
+@app.get("/v2/context_pack")
+async def v2_context_pack(
+    project: str = Query(...),
+    workflow: str = Query("default"),
+    limit: int = Query(20),
+):
+    pack = get_memory_store().context_pack(project=project, workflow=workflow, limit=limit)
+    pack["status"] = "success"
+    return pack
+
+
+@app.post("/v2/reindex")
+async def v2_reindex(skip_vectors: bool = Query(False)):
+    result = get_memory_store().rebuild_from_markdown(rebuild_vectors=not skip_vectors)
+    result["status"] = "success"
+    return result
+
+
+@app.get("/v2/schema_audit")
+async def v2_schema_audit():
+    result = get_memory_store().schema_audit()
+    result["status"] = "success"
+    return result
 
 
 # ===== MEMORY PRUNING ENDPOINT =====
@@ -473,52 +482,8 @@ async def prune_expired_memories(
     will be deleted. Use dry_run=true to preview without deleting.
     """
     try:
-        collection = get_chroma_collection()
-        all_docs = collection.get(include=["metadatas"])
-
-        if not all_docs["ids"]:
-            return PruneResponse(
-                status="success",
-                pruned_count=0,
-                total_before=0,
-                total_after=0,
-                by_category={}
-            )
-
-        total_before = len(all_docs["ids"])
-        now = datetime.now()
-
-        # Find expired memories
-        expired_ids = []
-        expired_by_category = {}
-
-        for i, doc_id in enumerate(all_docs["ids"]):
-            meta = all_docs["metadatas"][i] if all_docs["metadatas"] else {}
-            expires_at = meta.get("expires_at")
-
-            if expires_at:
-                try:
-                    exp_date = datetime.fromisoformat(expires_at)
-                    if exp_date < now:
-                        expired_ids.append(doc_id)
-                        cat = meta.get("category", "general")
-                        expired_by_category[cat] = expired_by_category.get(cat, 0) + 1
-                except ValueError:
-                    pass  # Invalid date format, skip
-
-        # Delete expired memories (unless dry run)
-        if expired_ids and not dry_run:
-            collection.delete(ids=expired_ids)
-
-        total_after = total_before - len(expired_ids) if not dry_run else total_before
-
-        return PruneResponse(
-            status="dry_run" if dry_run else "success",
-            pruned_count=len(expired_ids),
-            total_before=total_before,
-            total_after=total_after,
-            by_category=expired_by_category
-        )
+        result = get_memory_store().archive_expired(dry_run=dry_run)
+        return PruneResponse(**result)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -529,36 +494,18 @@ async def list_expired_memories(
 ):
     """List all currently expired memories (preview before pruning)."""
     try:
-        collection = get_chroma_collection()
-        all_docs = collection.get(include=["documents", "metadatas"])
-
         now = datetime.now()
         expired = []
-
-        if all_docs["ids"]:
-            for i, doc_id in enumerate(all_docs["ids"]):
-                meta = all_docs["metadatas"][i] if all_docs["metadatas"] else {}
-                expires_at = meta.get("expires_at")
-
-                if expires_at:
-                    try:
-                        exp_date = datetime.fromisoformat(expires_at)
-                        if exp_date < now:
-                            days_expired = (now - exp_date).days
-                            doc = all_docs["documents"][i] if all_docs["documents"] else ""
-                            expired.append({
-                                "id": doc_id,
-                                "memory": doc[:100] + "..." if len(doc) > 100 else doc,
-                                "category": meta.get("category", "general"),
-                                "project": meta.get("project", "general"),
-                                "expired_at": expires_at,
-                                "days_expired": days_expired
-                            })
-                    except ValueError:
-                        pass
-
-                if len(expired) >= limit:
-                    break
+        for memory in get_memory_store().expired(limit=limit):
+            exp_date = datetime.fromisoformat(memory.expires_at)
+            expired.append({
+                "id": memory.id,
+                "memory": memory.text[:100] + "..." if len(memory.text) > 100 else memory.text,
+                "category": memory.category,
+                "project": memory.project,
+                "expired_at": memory.expires_at,
+                "days_expired": (now - exp_date).days
+            })
 
         return {
             "status": "success",
